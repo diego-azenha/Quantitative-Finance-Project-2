@@ -1,5 +1,3 @@
-# plotting.py
-
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -35,10 +33,9 @@ def plot_mean_variance_frontier(
     filename="mean_variance_frontier.png"
 ):
     """
-    Mean-variance figure with two clouds:
-      - interior cloud (uniform Dirichlet, α=1)
-      - edge cloud (sparse Dirichlet, α<1) to visibly touch the frontier
-    Also plots exact frontier, CAL, RF, and optimal/min-var markers.
+    Mean-variance figure with two clouds (no legend entries),
+    efficient frontier curve, CAL, Optimal (green star), Min Var (blue diamond).
+    Labels appear to the left of the markers, close to the icons.
     """
     plt.figure(figsize=(10, 6))
 
@@ -48,8 +45,8 @@ def plot_mean_variance_frontier(
     sharpe_in = (R_in - rf_rate) / V_in
     sharpe_ed = (R_ed - rf_rate) / V_ed
 
-    # Interior cloud (fainter)
-    sc1 = plt.scatter(
+    # Interior cloud (no legend entry)
+    plt.scatter(
         V_in, R_in,
         c=sharpe_in,
         cmap="YlOrRd_r",
@@ -57,10 +54,10 @@ def plot_mean_variance_frontier(
         edgecolor="none",
         alpha=0.45,
         s=10,
-        label="Random (interior)"
+        label=None
     )
 
-    # Edge cloud (heavier alpha & size so it 'touches' the EF)
+    # Edge cloud (no legend entry)
     sc2 = plt.scatter(
         V_ed, R_ed,
         c=sharpe_ed,
@@ -69,35 +66,38 @@ def plot_mean_variance_frontier(
         edgecolor="none",
         alpha=0.85,
         s=14,
-        label="Random (sparse/edge)"
+        label=None
     )
 
     cbar = plt.colorbar(sc2)
     cbar.set_label("Sharpe Ratio")
 
-    # Risk-free
-    plt.axhline(rf_rate, color="#999999", linestyle=":", linewidth=1.0, label="Risk-free")
+    # Risk-free (no legend entry)
+    plt.axhline(rf_rate, color="#999999", linestyle=":", linewidth=1.0, label=None)
 
-    # Exact efficient frontier
+    # Efficient frontier (in legend)
     if ef_curve is not None and len(ef_curve[0]) > 1:
         ef_vols, ef_rets = ef_curve
         plt.plot(ef_vols, ef_rets, linewidth=2.0, linestyle="-", color="#303030", label="Efficient Frontier")
 
-    # CAL + markers
+    # CAL + Optimal
     if opt_point is not None:
         opt_vol, opt_ret = opt_point
         if opt_vol > 0 and np.isfinite(opt_ret):
             x = np.linspace(0, max(np.max(V_in), np.max(V_ed), opt_vol) * 1.05, 200)
             slope = (opt_ret - rf_rate) / opt_vol
             y = rf_rate + slope * x
-            plt.plot(x, y, linestyle="--", linewidth=1.6, color="#2b8cbe", label="CAL (Optimal)")
-        plt.scatter([opt_vol], [opt_ret], marker="*", s=180, zorder=5, color="#2b8cbe", label="Optimal (Sharpe-max)")
-        plt.annotate("Optimal", (opt_vol, opt_ret), xytext=(8, 8), textcoords="offset points")
+            plt.plot(x, y, linestyle="--", linewidth=1.6, color="#2ca25f", label="CAL (Optimal)")
+        plt.scatter([opt_vol], [opt_ret], marker="*", s=180, zorder=5, color="#2ca25f", label="Optimal (Sharpe-max)")
+        plt.annotate("Optimal", (opt_vol, opt_ret), xytext=(-25, 0), textcoords="offset points",
+                     ha="right", va="center")
 
+    # Minimum variance (blue)
     if mv_point is not None:
         mv_vol, mv_ret = mv_point
-        plt.scatter([mv_vol], [mv_ret], marker="D", s=90, zorder=5, color="#b2182b", label="Minimum Variance")
-        plt.annotate("Min Var", (mv_vol, mv_ret), xytext=(8, -12), textcoords="offset points")
+        plt.scatter([mv_vol], [mv_ret], marker="D", s=90, zorder=5, color="#08519c", label="Minimum Variance")
+        plt.annotate("Min Var", (mv_vol, mv_ret), xytext=(-25, 0), textcoords="offset points",
+                     ha="right", va="center")
 
     plt.title("Mean–Variance Frontier (annualized)")
     plt.xlabel("Portfolio Volatility (Risk)")
@@ -109,7 +109,12 @@ def plot_mean_variance_frontier(
     plt.savefig(outpath, dpi=300, bbox_inches="tight")
     plt.show()
 
-def plot_two_asset_frontier(portfolio_volatilities_list, portfolio_returns_list, correlations, filename="two_asset_frontier.png"):
+def plot_two_asset_frontier(
+    portfolio_volatilities_list,
+    portfolio_returns_list,
+    correlations,
+    filename="two_asset_frontier.png"
+):
     plt.figure(figsize=(10, 6))
     corr_colors = ["#1a9850", "#91cf60", "#d9ef8b", "#fee08b", "#fc8d59", "#d73027"]
     for i, corr in enumerate(correlations):
