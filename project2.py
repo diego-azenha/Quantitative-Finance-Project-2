@@ -1,151 +1,174 @@
-import pandas as pd
+# main.py
+
+import warnings
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
 from pathlib import Path
 from scipy.optimize import minimize
+from plots import plot_mean_variance_frontier, plot_two_asset_frontier
 
-# ---------- Load stock prices data ----------
+# ---- Silence ONLY the legacy 'M' alias warning (defensive) ----
+warnings.filterwarnings(
+    "ignore",
+    message=".*'M' is deprecated and will be removed.*",
+    category=FutureWarning,
+)
 
-# Set the base directory and load the stock price data
+# ---------- Load stock prices ----------
 base = Path(__file__).resolve().parent
 data_dir = base / "clean_data"
 prices = pd.read_parquet(data_dir / "clean_stock_prices.parquet").sort_index()
 prices.index = pd.to_datetime(prices.index)
 
-# ---------- Calculate monthly returns ----------
+# ---------- Monthly returns (use MonthEnd to avoid deprecation) ----------
+m_prices = prices.resample("ME").last()
+m_rets   = m_prices.pct_change().dropna(how="any")
 
-# Calculate monthly returns for the 30 stocks
-returns = prices.pct_change().dropna()
-
-# Annualized risk-free rate (4.92% per year, assuming it’s constant)
+# ---------- Annualized inputs ----------
 rf_rate = 0.0492
+mu_annual    = (m_rets.mean() * 12).values
+Sigma_annual = (m_rets.cov()  * 12).values
+tickers = m_rets.columns.to_list()
+n = len(tickers)
 
-# ---------- Calculate the risk premium (10-year excess return) ----------
+# ---------- Core portfolio functions ----------
+def port_perf(w, mu, Sigma, rf):
+    r = float(w @ mu)
+    v = float(np.sqrt(w @ Sigma @ w))
+    sr = (r - rf) / v if v > 0 else np.nan
+    return r, v, sr
 
-# Calculate annualized returns over the last 10 years (120 months)
-annualized_returns = returns.mean() * 12
+def neg_sharpe(w, mu, Sigma, rf):
+    r, v, _ = port_perf(w, mu, Sigma, rf)
+    return - (r - rf) / v
 
-# Calculate the excess returns (risk premium)
-excess_returns = annualized_returns - rf_rate
+def min_var_weights(Sigma):
+    n_ = Sigma.shape[0]
+    x0 = np.full(n_, 1/n_)
+    bnds = [(0.0, 1.0)] * n_
+    cons = [{'type': 'eq', 'fun': lambda w: w.sum() - 1}]
+    obj = lambda w: w @ Sigma @ w
+    res = minimize(obj, x0, method="SLSQP", bounds=bnds, constraints=cons)
+    if not res.success:
+        raise RuntimeError(res.message)
+    return res.x
 
-# ---------- Covariance matrix of returns ----------
+# ---------- Optimal (Sharpe-max) and Minimum-Variance portfolios ----------
+x0 = np.full(n, 1/n)
+bnds = [(0.0, 1.0)] * n
+cons = [{'type': 'eq', 'fun': lambda w: w.sum() - 1}]
 
-# Covariance matrix of returns
-cov_matrix = returns.cov() * 12  # Annualize the covariance matrix
+res_opt = minimize(neg_sharpe, x0,
+                   args=(mu_annual, Sigma_annual, rf_rate),
+                   method="SLSQP", bounds=bnds, constraints=cons)
+if not res_opt.success:
+    raise RuntimeError(res_opt.message)
+w_opt = res_opt.x
 
-# ---------- Portfolio Performance ----------
+w_mv  = min_var_weights(Sigma_annual)
 
-# Function to calculate portfolio performance (return and volatility)
-def portfolio_performance(weights, mean_returns, cov_matrix):
-    portfolio_return = np.sum(weights * mean_returns)
-    portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-    return portfolio_return, portfolio_volatility
+opt_ret, opt_vol, opt_sr = port_perf(w_opt, mu_annual, Sigma_annual, rf_rate)
+mv_ret,  mv_vol,  mv_sr  = port_perf(w_mv,  mu_annual, Sigma_annual, rf_rate)
 
-# ---------- Sharpe Ratio ----------
+# ---------- Realized perf with monthly rebalancing to FIXED weights ----------
+def backtest_fixed_weights(monthly_returns: pd.DataFrame, w: np.ndarray):
+    pr = monthly_returns.dot(w).dropna()
+    ann_ret = (1 + pr.mean())**12 - 1
+    ann_vol = pr.std() * np.sqrt(12)
+    sharpe  = (ann_ret - rf_rate) / ann_vol if ann_vol > 0 else np.nan
+    cum = (1 + pr).cumprod()
+    return cum, ann_ret, ann_vol, sharpe
 
-# Function to calculate the Sharpe ratio
-def sharpe_ratio(weights, mean_returns, cov_matrix, rf_rate):
-    portfolio_return, portfolio_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
-    return -(portfolio_return - rf_rate) / portfolio_volatility  # Negative for minimization
+cum_opt, ann_opt, vol_opt, sr_opt = backtest_fixed_weights(m_rets, w_opt)
+cum_mv,  ann_mv,  vol_mv,  sr_mv  = backtest_fixed_weights(m_rets, w_mv)
 
-# ---------- Minimum Variance Portfolio ----------
+# ---------- Helper: sample long-only weights on simplex ----------
+def sample_cloud(mu, Sigma, N=100_000, alpha=1.0, rng=None):
+    """
+    Draw N long-only fully-invested portfolios from Dirichlet(alpha).
+    alpha=1   => uniform interior cloud
+    alpha<1   => sparse, corner-hugging cloud (touches frontier)
+    """
+    rng = np.random.default_rng(None if rng is None else rng)
+    W = rng.dirichlet(alpha=np.full(n, alpha), size=N)     # (N, n)
+    R = W @ mu
+    V = np.sqrt(np.einsum('ij,jk,ik->i', W, Sigma, W))
+    return V.tolist(), R.tolist()
 
-# Function to find the Minimum Variance Portfolio
-def minimum_variance_portfolio(cov_matrix):
-    num_assets = len(cov_matrix)
-    args = (cov_matrix,)
-    weights = np.ones(num_assets) / num_assets  # Initial guess: equal weights
+# ---------- Clouds: interior + edge (sparse) ----------
+V_in, R_in = sample_cloud(mu_annual, Sigma_annual, N=150_000, alpha=1.0)
+V_edge, R_edge = sample_cloud(mu_annual, Sigma_annual, N=150_000, alpha=0.15)
 
-    def variance(weights, cov_matrix):
-        return portfolio_performance(weights, np.zeros(len(weights)), cov_matrix)[1] ** 2
+# ---------- True efficient frontier (same constraints) ----------
+def solve_min_var_for_target(mu, Sigma, target_ret):
+    n_ = len(mu)
+    x0 = np.full(n_, 1/n_)
+    bnds = [(0.0, 1.0)] * n_
+    cons = [
+        {'type': 'eq', 'fun': lambda w: w.sum() - 1},
+        {'type': 'eq', 'fun': lambda w, t=target_ret: float(w @ mu) - t},
+    ]
+    obj = lambda w: w @ Sigma @ w
+    res = minimize(obj, x0, method="SLSQP", bounds=bnds, constraints=cons)
+    return res
 
-    result = minimize(variance, weights, args=args, method="SLSQP", bounds=[(0, 1)] * num_assets, constraints={'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
-    return result.x
+mu_min, mu_max = float(np.min(mu_annual)), float(np.max(mu_annual))
+targets = np.linspace(mu_min*1.02, mu_max*0.98, 100)
+ef_vols, ef_rets = [], []
+for t in targets:
+    res = solve_min_var_for_target(mu_annual, Sigma_annual, t)
+    if res.success:
+        v = np.sqrt(res.x @ Sigma_annual @ res.x)
+        ef_vols.append(float(v))
+        ef_rets.append(float(t))
 
-# ---------- Find the Optimal Portfolio and Minimum Variance Portfolio ----------
+# ---------- Plotting (now with two clouds) ----------
+plot_mean_variance_frontier(
+    cloud_interior=(V_in, R_in),
+    cloud_edge=(V_edge, R_edge),
+    rf_rate=rf_rate,
+    opt_point=(opt_vol, opt_ret),
+    mv_point=(mv_vol, mv_ret),
+    ef_curve=(ef_vols, ef_rets),
+    filename="mean_variance_frontier.png",
+)
 
-# Find the optimal portfolio (maximum Sharpe ratio)
-num_assets = len(excess_returns)
-initial_weights = np.ones(num_assets) / num_assets  # Initial guess
+# ---------- Two-asset frontier (unchanged) ----------
+asset1, asset2 = 0, 1
+Sigma2_base = (m_rets.iloc[:, [asset1, asset2]].cov() * 12)
+mu2 = (m_rets.mean() * 12).iloc[[asset1, asset2]].values
+correlations = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
 
-result = minimize(sharpe_ratio, initial_weights, args=(excess_returns, cov_matrix, rf_rate),
-                  method="SLSQP", bounds=[(0, 1)] * num_assets, constraints={'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
-
-optimal_weights = result.x
-optimal_return, optimal_volatility = portfolio_performance(optimal_weights, excess_returns, cov_matrix)
-
-# Find the Minimum Variance Portfolio
-mv_weights = minimum_variance_portfolio(cov_matrix)
-mv_return, mv_volatility = portfolio_performance(mv_weights, excess_returns, cov_matrix)
-
-# ---------- Performance Stats ----------
-
-# Performance stats: Sharpe Ratio for both portfolios
-optimal_sharpe_ratio = (optimal_return - rf_rate) / optimal_volatility
-mv_sharpe_ratio = (mv_return - rf_rate) / mv_volatility
-
-print("Optimal Portfolio Performance:")
-print(f"Return: {optimal_return:.4f}, Volatility: {optimal_volatility:.4f}")
-print(f"Sharpe Ratio: {optimal_sharpe_ratio:.4f}")
-
-print("Minimum Variance Portfolio Performance:")
-print(f"Return: {mv_return:.4f}, Volatility: {mv_volatility:.4f}")
-print(f"Sharpe Ratio: {mv_sharpe_ratio:.4f}")
-
-# ---------- Mean-Variance Frontier ----------
-
-# Generate the mean-variance frontier
-portfolio_returns = []
-portfolio_volatilities = []
-portfolio_weights = []
-
-for i in range(10000):
-    weights = np.random.random(num_assets)
-    weights /= np.sum(weights)  # Ensure the sum of weights is 1
-    portfolio_return, portfolio_volatility = portfolio_performance(weights, excess_returns, cov_matrix)
-    portfolio_returns.append(portfolio_return)
-    portfolio_volatilities.append(portfolio_volatility)
-    portfolio_weights.append(weights)
-
-# Plot the mean-variance frontier
-plt.figure(figsize=(10, 6))
-plt.scatter(portfolio_volatilities, portfolio_returns, c=(np.array(portfolio_returns) - rf_rate) / np.array(portfolio_volatilities), cmap='viridis', marker='o')
-plt.colorbar(label="Sharpe Ratio")
-plt.title("Mean-Variance Frontier")
-plt.xlabel("Portfolio Volatility (Risk)")
-plt.ylabel("Portfolio Return")
-plt.grid(True)
-plt.show()
-
-# ---------- Varying Correlation with Two Assets ----------
-
-# Select two assets
-asset1 = 0
-asset2 = 1
-cov_matrix_2assets = returns.iloc[:, [asset1, asset2]].cov() * 12
-
-# Vary correlation and plot the mean-variance frontier
-correlations = np.linspace(-1, 1, 5)
-plt.figure(figsize=(10, 6))
-
+vols_list, rets_list = [], []
+s1, s2 = Sigma2_base.iloc[0,0], Sigma2_base.iloc[1,1]
 for corr in correlations:
-    cov_matrix_2assets.iloc[0, 1] = cov_matrix_2assets.iloc[1, 0] = corr * np.sqrt(cov_matrix_2assets.iloc[0, 0] * cov_matrix_2assets.iloc[1, 1])
-    portfolio_returns = []
-    portfolio_volatilities = []
-    
-    for i in range(10000):
-        w1 = np.random.random()
-        w2 = 1 - w1
-        weights = np.array([w1, w2])
-        portfolio_return, portfolio_volatility = portfolio_performance(weights, excess_returns.iloc[[asset1, asset2]], cov_matrix_2assets)
-        portfolio_returns.append(portfolio_return)
-        portfolio_volatilities.append(portfolio_volatility)
-    
-    plt.scatter(portfolio_volatilities, portfolio_returns, label=f"Corr={corr:.2f}")
+    Sigma2 = Sigma2_base.copy()
+    Sigma2.iloc[0,1] = Sigma2.iloc[1,0] = corr * np.sqrt(s1 * s2)
+    v_list, r_list = [], []
+    for _ in range(10_000):
+        w1 = np.random.random(); w = np.array([w1, 1 - w1])
+        r, v, _ = port_perf(w, mu2, Sigma2.values, rf_rate)
+        r_list.append(r); v_list.append(v)
+    vols_list.append(v_list); rets_list.append(r_list)
 
-plt.title("Mean-Variance Frontier with Two Assets (Varying Correlation)")
-plt.xlabel("Portfolio Volatility")
-plt.ylabel("Portfolio Return")
-plt.legend()
-plt.grid(True)
-plt.show()
+plot_two_asset_frontier(vols_list, rets_list, correlations)
+
+# ---------- Pretty console output ----------
+def print_results(title, ann_ret, ann_vol, sharpe):
+    print(f"{title:<45}")
+    print(f"  Annual Return    : {ann_ret:>7.2%}")
+    print(f"  Annual Volatility: {ann_vol:>7.2%}")
+    print(f"  Sharpe Ratio     : {sharpe:>7.2f}")
+    print("-" * 55)
+
+print("\n" + "=" * 55)
+print(" STATIC OPTIMIZATION (10Y ESTIMATES, FIXED WEIGHTS) ")
+print("=" * 55)
+print_results("Optimal Portfolio (Sharpe-max)", opt_ret, opt_vol, opt_sr)
+print_results("Minimum Variance Portfolio",     mv_ret,  mv_vol,  mv_sr)
+
+print("\n" + "=" * 55)
+print(" BACKTEST RESULTS (MONTHLY REBALANCE TO FIXED WEIGHTS) ")
+print("=" * 55)
+print_results("Backtested Optimal Portfolio",    ann_opt, vol_opt, sr_opt)
+print_results("Backtested Minimum Variance",     ann_mv,  vol_mv,  sr_mv)
