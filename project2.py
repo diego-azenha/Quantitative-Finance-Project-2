@@ -153,6 +153,19 @@ for corr in correlations:
 
 plot_two_asset_frontier(vols_list, rets_list, correlations)
 
+# ---------- Print portfolio weights (sorted) ----------
+def print_weights(title, w, tickers):
+    s = pd.Series(w, index=tickers).sort_values(ascending=False)
+    print(f"\n{title}")
+    print("-" * 55)
+    for t, v in s.items():
+        print(f"{t:<10} {v:>7.2%}")
+    print("-" * 55)
+
+print_weights("Optimal Portfolio Weights (Sharpe-max)", w_opt, tickers)
+print_weights("Minimum Variance Portfolio Weights",     w_mv,  tickers)
+
+
 # ---------- Pretty console output ----------
 def print_results(title, ann_ret, ann_vol, sharpe):
     print(f"{title:<45}")
