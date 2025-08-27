@@ -2,6 +2,11 @@
 
 This repo implements a clean, reproducible pipeline to estimate a long-only mean–variance efficient frontier from 10-year monthly data, locate the Sharpe-max (“optimal”) and minimum-variance portfolios under fully-invested constraints, and backtest both with monthly rebalancing to fixed weights. It also generates a two-asset diversification demo by sweeping correlations from −1 to +1.
 
+## Main Results
+
+![Efficient Frontier](results/mean_variance_frontier.png)
+![Two-Asset Correlation Sweep](results/two_asset_frontier.png)
+
 ---
 
 ## 📁 Repo Structure
@@ -11,7 +16,7 @@ clean_data/
 results/
 ├─ mean_variance_frontier.png # cloud + efficient frontier + optimal & min-var markers
 └─ two_asset_frontier.png # correlation-sweep illustration (file name may differ in your plots.py)
-main.py # end-to-end script: estimates, optimization, backtest, plots, console output
+project2.py # end-to-end script: estimates, optimization, backtest, plots, console output
 plots.py # all plotting routines (frontier cloud, styling, labels, two-asset figure)
 requirements.txt # Python dependencies
 README.md # this file
@@ -44,4 +49,6 @@ Minimal packages (if you don’t use requirements.txt): numpy, pandas, scipy, ma
 ```
 # From the repo root (where main.py lives)
 python main.py
-``` 
+```
+
+
